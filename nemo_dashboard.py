@@ -4,203 +4,239 @@ import sqlite3
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import json
+import ast
+import numpy as np
 
 # 페이지 설정
-st.set_page_config(page_title="NemoStore Advanced Dashboard", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="NemoStore v2 - Premium Insight", layout="wide", initial_sidebar_state="expanded")
 
-# 커스텀 CSS (Premium Design)
+# 커스텀 CSS (UI 개선)
 st.markdown("""
 <style>
-    .main {
-        background-color: #f8f9fa;
+    .main { background-color: #f8fafc; }
+    .card {
+        background-color: white;
+        padding: 1.5rem;
+        border-radius: 0.75rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        margin-bottom: 1rem;
     }
-    .stMetric {
-        background-color: #ffffff;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    .metric-container {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: white;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border: 1px solid #e2e8f0;
     }
-    .insight-card {
-        background-color: #e9ecef;
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #007bff;
-        margin-bottom: 20px;
+    .benchmark-high { color: #e53e3e; font-weight: bold; }
+    .benchmark-low { color: #38a169; font-weight: bold; }
+    .gallery-title {
+        font-size: 0.9rem;
+        font-weight: 600;
+        margin-top: 0.5rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
-    h1 {
-        color: #1e293b;
-        font-weight: 800;
-    }
-    .stButton>button {
-        width: 100%;
-        border-radius: 5px;
-        height: 3em;
-        background-color: #007bff;
+    .detail-header {
+        background: linear-gradient(90deg, #1e293b 0%, #334155 100%);
         color: white;
+        padding: 2rem;
+        border-radius: 0.75rem;
+        margin-bottom: 2rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# 데이터 로드 함수
+# 변수 상환 (Friendly Column Names)
+COLUMN_MAPPING = {
+    'title': '매물명',
+    'businessMiddleCodeName': '업종',
+    'deposit': '보증금(만원)',
+    'monthlyRent': '월세(만원)',
+    'premium': '권리금(만원)',
+    'maintenanceFee': '관리비(만원)',
+    'size': '전용면적(㎡)',
+    'floor': '층',
+    'nearSubwayStation': '인근역',
+    'viewCount': '조회수',
+    'favoriteCount': '찜하기'
+}
+
+# 데이터 로드
 @st.cache_data
 def load_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
     db_path = os.path.join(parent_dir, "data", "nemostore.db") 
+    if not os.path.exists(db_path): db_path = "nemostore.db"
     
-    if not os.path.exists(db_path):
-        db_path = "nemostore.db"
-
     conn = sqlite3.connect(db_path)
-    query = "SELECT * FROM stores"
-    df = pd.read_sql(query, conn)
+    df = pd.read_sql("SELECT * FROM stores", conn)
     conn.close()
     
-    # 전처리
-    df['deposit'] = df['deposit'].fillna(0)
-    df['monthlyRent'] = df['monthlyRent'].fillna(0)
-    df['premium'] = df['premium'].fillna(0)
-    df['maintenanceFee'] = df['maintenanceFee'].fillna(0)
+    # 전처리 루틴
+    for col in ['deposit', 'monthlyRent', 'premium', 'maintenanceFee']:
+        df[col] = df[col].fillna(0)
     
-    # 상가당 평당가(만원/㎡) 계산
-    df['rent_per_size'] = df['monthlyRent'] / df['size'].replace(0, 1)
+    # 평당가
+    df['py_rent'] = df['monthlyRent'] / (df['size'] / 3.3).replace(0, 1)
+    
+    # 사진 데이터 파싱 (문자열 리스트 -> 실제 리스트)
+    def parse_urls(x):
+        try:
+            if isinstance(x, str) and (x.startswith('[') or x.startswith('{')):
+                return ast.literal_eval(x)
+            return []
+        except: return []
+        
+    df['photo_list'] = df['smallPhotoUrls'].apply(parse_urls)
+    
+    # 지도용 가상 좌표 생성 (을지로 1가 기준)
+    np.random.seed(42)
+    df['lat'] = 37.5665 + np.random.normal(0, 0.005, len(df))
+    df['lon'] = 126.9850 + np.random.normal(0, 0.005, len(df))
     
     return df
 
-# 글로벌 EDA 기준값 (eda_report.md 기반)
-GLOBAL_AVG_DEPOSIT = 3450
-GLOBAL_AVG_RENT = 260
-GLOBAL_TOTAL_COUNT = 333
+df = load_data()
 
-# 데이터 실행
-try:
-    df = load_data()
-except Exception as e:
-    st.error(f"데이터 로드 실패: {e}")
-    st.stop()
+# 세션 상태 초기화
+if 'selected_store_id' not in st.session_state:
+    st.session_state.selected_store_id = None
 
-# 사이드바 설정
-st.sidebar.image("https://www.nemoapp.kr/image/common/nemo_logo.svg", width=150)
-st.sidebar.title("💎 Premium Filter")
+# 사이드바
+st.sidebar.title("🔍 Nemo Dashboard v2")
+search_query = st.sidebar.text_input("매물명 또는 업종 검색", "")
 
-# 1. 텍스트 검색
-search_query = st.sidebar.text_input("📍 키워드 검색 (제목/업종)", placeholder="예: 카페, 을지로, 대형")
+# 카테고리 필터
+categories = ["전체"] + sorted(df['businessMiddleCodeName'].unique().tolist())
+selected_cat = st.sidebar.selectbox("업종 필터", categories)
 
-# 2. 가격 조건 필터
-st.sidebar.markdown("---")
-st.sidebar.subheader("💰 Price Configuration")
-deposit_range = st.sidebar.slider("보증금 (만원)", 0, int(df['deposit'].max()), (0, int(df['deposit'].max())))
-rent_range = st.sidebar.slider("월세 (만원)", 0, int(df['monthlyRent'].max()), (0, int(df['monthlyRent'].max())))
-premium_range = st.sidebar.slider("권리금 (만원)", 0, int(df['premium'].max()), (0, int(df['premium'].max())))
-maint_range = st.sidebar.slider("관리비 (만원)", 0, int(df['maintenanceFee'].max()), (0, int(df['maintenanceFee'].max())))
+# 가격 필터
+st.sidebar.subheader("💰 상세 필터")
+deposit_range = st.sidebar.slider("보증금(만원)", 0, int(df['deposit'].max()), (0, int(df['deposit'].max())))
+rent_range = st.sidebar.slider("월세(만원)", 0, int(df['monthlyRent'].max()), (0, int(df['monthlyRent'].max())))
 
-# 필터링
+# 필터링 적용
 filtered_df = df[
     (df['deposit'].between(deposit_range[0], deposit_range[1])) &
-    (df['monthlyRent'].between(rent_range[0], rent_range[1])) &
-    (df['premium'].between(premium_range[0], premium_range[1])) &
-    (df['maintenanceFee'].between(maint_range[0], maint_range[1]))
+    (df['monthlyRent'].between(rent_range[0], rent_range[1]))
 ]
-
+if selected_cat != "전체":
+    filtered_df = filtered_df[filtered_df['businessMiddleCodeName'] == selected_cat]
 if search_query:
-    filtered_df = filtered_df[
-        filtered_df['title'].str.contains(search_query, case=False, na=False) |
-        filtered_df['businessMiddleCodeName'].str.contains(search_query, case=False, na=False)
-    ]
+    filtered_df = filtered_df[filtered_df['title'].str.contains(search_query, case=False, na=False)]
 
-# 메인 헤더
-st.title("🏢 NemoStore Insight Dashboard")
-st.markdown(f"선택된 조건에 따라 총 **{len(filtered_df)}**개의 매물을 분석 중입니다.")
-
-# 💡 EDA Insight Section
-with st.container():
-    st.subheader("💡 Analysis Insights (from EDA Report)")
-    cols = st.columns(3)
+# --- 화면 전환 로직 ---
+if st.session_state.selected_store_id is not None:
+    # --- 상세페이지 뷰 ---
+    store = df[df['id'] == st.session_state.selected_store_id].iloc[0]
     
-    # 동적 분석 로직
-    avg_rent = filtered_df['monthlyRent'].mean() if not filtered_df.empty else 0
-    top_biz = filtered_df['businessMiddleCodeName'].mode()[0] if not filtered_df.empty else "N/A"
-    
-    rent_diff = avg_rent - GLOBAL_AVG_RENT
-    rent_status = "높음 📈" if rent_diff > 0 else "낮음 📉"
-    
-    with cols[0]:
-        st.markdown(f"""
-        <div class="insight-card">
-            <h4>상권 특성</h4>
-            <p>현재 검색된 매물 중 가장 많은 업종은 <b>{top_biz}</b>입니다. 이는 전체 상권의 중심 트렌드와 일치하는 경향을 보입니다.</p>
-        </div>
-        """, unsafe_allow_html=True)
+    if st.button("⬅️ 목록으로 돌아가기"):
+        st.session_state.selected_store_id = None
+        st.rerun()
         
-    with cols[1]:
+    st.markdown(f"""
+    <div class="detail-header">
+        <h1>{store['title']}</h1>
+        <p>📍 {store['nearSubwayStation']} | 🏢 {store['businessMiddleCodeName']}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col_img, col_info = st.columns([1, 1])
+    
+    with col_img:
+        photos = store['photo_list']
+        if photos:
+            st.image(photos[0], use_container_width=True, caption="Main Photo")
+            if len(photos) > 1:
+                sub_cols = st.columns(min(4, len(photos)-1))
+                for idx, p in enumerate(photos[1:5]):
+                    sub_cols[idx].image(p, use_container_width=True)
+        else:
+            st.warning("이미지가 없습니다.")
+            
+    with col_info:
+        st.subheader("📋 매물 상세 정보")
+        info_df = pd.DataFrame({
+            "항목": [COLUMN_MAPPING[k] for k in ['deposit', 'monthlyRent', 'premium', 'maintenanceFee', 'size', 'floor']],
+            "정보": [
+                f"{store['deposit']:,.0f} 만원", f"{store['monthlyRent']:,.0f} 만원",
+                f"{store['premium']:,.0f} 만원", f"{store['maintenanceFee']:,.0f} 만원",
+                f"{store['size']:.2f} ㎡", f"{store['floor']}층"
+            ]
+        })
+        st.table(info_df)
+        
+        # Benchmarking
+        st.subheader("⚖️ 시장 가치 분석 (Peers Benchmarking)")
+        peer_df = df[df['businessMiddleCodeName'] == store['businessMiddleCodeName']]
+        avg_rent_peer = peer_df['monthlyRent'].mean()
+        diff_rent = ((store['monthlyRent'] - avg_rent_peer) / avg_rent_peer) * 100
+        
+        color = "benchmark-high" if diff_rent > 0 else "benchmark-low"
+        status = "비쌈" if diff_rent > 0 else "저렴"
         st.markdown(f"""
-        <div class="insight-card">
-            <h4>가격 수준 비교</h4>
-            <p>필터링된 매물의 평균 월세는 <b>{avg_rent:.1f}만원</b>으로, 전체 평균({GLOBAL_AVG_RENT}만원) 대비 <b>{abs(rent_diff):.1f}만원 {rent_status}</b> 상태입니다.</p>
+        <div class="card">
+            <p>동일 업종({store['businessMiddleCodeName']}) 평균 월세 <b>{avg_rent_peer:,.0f}만원</b> 대비 
+            <span class="{color}"> {abs(diff_rent):.1f}% {status}</span> 합니다.
+            </p>
         </div>
         """, unsafe_allow_html=True)
 
-    with cols[2]:
-        st.markdown("""
-        <div class="insight-card">
-            <h4>입지 인사이트</h4>
-            <p>보고서에 따르면 <b>을지로/종로 CBD</b> 구역은 높은 평당 임대료를 형성합니다. 대형 오피스 빌딩 내 지하 매물은 면적 대비 효율성을 고려하십시오.</p>
-        </div>
-        """, unsafe_allow_html=True)
+else:
+    # --- 메인 대시보드 (갤러리/지도/테이블) ---
+    st.title("🏙️ NemoStore Premium Dashboard")
+    
+    tab1, tab2, tab3 = st.tabs(["🖼️ 갤러리 뷰", "🗺️ 지도 시각화", "📈 데이터 분석"])
+    
+    with tab1:
+        st.write(f"총 {len(filtered_df)}개의 매물")
+        # 갤러리 구현 (Grid)
+        cols_per_row = 4
+        rows = int(len(filtered_df) / cols_per_row) + 1
+        
+        for r in range(rows):
+            grid_cols = st.columns(cols_per_row)
+            for c in range(cols_per_row):
+                idx = r * cols_per_row + c
+                if idx < len(filtered_df):
+                    row = filtered_df.iloc[idx]
+                    with grid_cols[c]:
+                        photos = row['photo_list']
+                        img_url = photos[0] if photos else "https://via.placeholder.com/300x200?text=No+Image"
+                        st.image(img_url, use_container_width=True)
+                        st.markdown(f"<div class='gallery-title'>{row['title']}</div>", unsafe_allow_html=True)
+                        st.caption(f"{row['monthlyRent']:,.0f} / {row['deposit']:,.0f}")
+                        if st.button("상세보기", key=f"btn_{row['id']}"):
+                            st.session_state.selected_store_id = row['id']
+                            st.rerun()
 
-st.divider()
+    with tab2:
+        st.subheader("📍 매물 위치 및 밀집도")
+        # Map View
+        st.map(filtered_df[['lat', 'lon']], zoom=13)
+        st.info("💡 위 지도는 역 주변(을지로 권역)을 중심으로 한 시뮬레이션 위치입니다.")
 
-# 주요 지표
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("평균 보증금", f"{filtered_df['deposit'].mean():,.0f} 만원", f"전체 평균 대비 {filtered_df['deposit'].mean() - GLOBAL_AVG_DEPOSIT:,.0f}")
-m2.metric("평균 월세", f"{filtered_df['monthlyRent'].mean():,.0f} 만원", f"{rent_diff:,.1f}", delta_color="inverse")
-m3.metric("평균 권리금", f"{filtered_df['premium'].mean():,.0f} 만원")
-m4.metric("평균 면적", f"{filtered_df['size'].mean():.1f} ㎡")
-
-# 시각화
-st.divider()
-c1, c2 = st.columns([2, 3])
-
-with c1:
-    st.subheader("📊 Category Distribution")
-    biz_counts = filtered_df['businessMiddleCodeName'].value_counts().reset_index()
-    biz_counts.columns = ['Category', 'Count']
-    fig_pie = px.pie(biz_counts.head(10), values='Count', names='Category', hole=0.5,
-                     color_discrete_sequence=px.colors.qualitative.Bold,
-                     template="plotly_white")
-    fig_pie.update_layout(showlegend=True, margin=dict(t=30, b=10, l=10, r=10))
-    st.plotly_chart(fig_pie, use_container_width=True)
-
-with c2:
-    st.subheader("🎯 Size vs Rent Efficiency")
-    fig_scatter = px.scatter(filtered_df, x='size', y='monthlyRent', 
-                             color='businessMiddleCodeName', size='deposit',
-                             hover_name='title',
-                             labels={'size': 'Area (㎡)', 'monthlyRent': 'Rent (k KRW)'},
-                             template="plotly_white",
-                             color_discrete_sequence=px.colors.qualitative.Vivid)
-    fig_scatter.update_layout(margin=dict(t=30, b=10, l=10, r=10))
-    st.plotly_chart(fig_scatter, use_container_width=True)
-
-# 하단 분석
-st.divider()
-st.subheader("📉 Price Distribution & Outliers")
-fig_box = px.box(filtered_df, x='businessMiddleCodeName', y='monthlyRent', 
-                 color='businessMiddleCodeName', points="all",
-                 labels={'businessMiddleCodeName': 'Business Type', 'monthlyRent': 'Monthly Rent'},
-                 template="plotly_white")
-fig_box.update_layout(showlegend=False)
-st.plotly_chart(fig_box, use_container_width=True)
-
-# 데이터 테이블
-st.divider()
-st.subheader("🔎 Matched Listings Detail")
-st.dataframe(
-    filtered_df[['title', 'businessMiddleCodeName', 'deposit', 'monthlyRent', 'premium', 'maintenanceFee', 'size', 'floor', 'nearSubwayStation']],
-    use_container_width=True,
-    height=400
-)
+    with tab3:
+        # 기존 분석 + 가독성 높은 테이블
+        st.subheader("📊 매물 상세 리스트")
+        # 컬럼명 변경 적용
+        display_df = filtered_df[['title', 'businessMiddleCodeName', 'deposit', 'monthlyRent', 'premium', 'maintenanceFee', 'size', 'floor', 'nearSubwayStation']].copy()
+        display_df.columns = [COLUMN_MAPPING[c] for c in display_df.columns]
+        st.dataframe(display_df, use_container_width=True)
+        
+        st.divider()
+        st.subheader("🏢 층별 월세 비교")
+        fig_floor = px.box(filtered_df, x='floor', y='monthlyRent', color='floor',
+                           labels={'floor': '층', 'monthlyRent': '월세(만원)'},
+                           template="plotly_white")
+        st.plotly_chart(fig_floor, use_container_width=True)
 
 # Footer
 st.markdown("---")
-st.caption("Powered by NemoStore EDA Engine | Data analysis based on 2025 listings.")
+st.caption("Premium Dashboard v2.0 - Intelligence for NemoStore Listings")
